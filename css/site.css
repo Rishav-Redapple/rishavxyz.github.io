@@ -29,6 +29,12 @@ a[target='_blank']::after {
   mask-size: contain;
 }
 
+#btnTheme {
+  padding: 0;
+  margin: 0;
+  border: none;
+}
+
 main {
   margin-block: var(--pico-spacing);
 }
