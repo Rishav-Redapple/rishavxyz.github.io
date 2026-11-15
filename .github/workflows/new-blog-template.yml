@@ -1,0 +1,96 @@
+name: New Blog Template
+
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      body:
+        description: 'Markdown template'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  scaffold-and-pr:
+    name: Parse and create a new blog PR
+    if: >-
+      ( github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner) ||
+      ( github.event_name == 'issues' &&
+        github.event.issue.user.login == github.repository_owner &&
+        github.actor == github.repository_owner &&
+        startsWith(github.event.issue.title, 'new blog') &&
+        contains(github.event.issue.labels.*.name, 'blog')
+      )
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Create blog template
+        id: template
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body || github.event.inputs.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: bun cli.ts --github --parse-issue "$ISSUE_BODY"
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.template.outputs.branch_name }}
+          PR_TITLE: ${{ steps.template.outputs.pr_title }}
+          TITLE: ${{ steps.template.outputs.title }}
+          ISSUE_NUMBER: ${{ steps.template.outputs.issue_number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Switch to new branch
+          git checkout -b "$BRANCH_NAME"
+
+          # Stage new content directory
+          git add content/blogs/
+          git commit -m "new blog: $TITLE"
+
+          # Push branch
+          git push -u origin "$BRANCH_NAME" --force
+
+          # Prepare PR description
+          PR_BODY="New blog created from issue.
+
+          Edit README.md in this PR to edit the blog if needed.
+          "
+          if [ -n "$ISSUE_NUMBER" ]; then
+            PR_BODY="${PR_BODY}Closes #${ISSUE_NUMBER}"
+          fi
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json url --jq '.[0].url' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR already exists: $EXISTING_PR"
+            PR_URL="$EXISTING_PR"
+          else
+            PR_URL=$(gh pr create \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --head "$BRANCH_NAME" \
+              --base main)
+            echo "Created PR: $PR_URL"
+          fi
+
+          # Comment on issue if triggered by issue
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "🚀 Created PR for your new blog: $PR_URL - edit README.md and merge to publish!" || true
+          fi

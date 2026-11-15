@@ -8,3 +8,5 @@ test.ts
 package.json
 tsconfig.json
 bun*
+.env
+.env.*
