@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { DIRS } from './index'
-import { die, fdate, type FileCons, fjoin, readglob, slugify, tsnow, unwrap, write } from './utils'
+import { type FileCons, die, fjoin, readglob, slugify, tsnow, unwrap, write } from './utils'
 
 export type CommonMetadata = {
   title: string
@@ -109,6 +109,9 @@ export async function parseIssue(body: string) {
       default: metadata.excerpt = line; break
     }
   }
+  if (!metadata.title || !metadata.excerpt || !metadata.category) {
+    die('refusing: reason: title, excerpt and category are must')
+  }
 
   return await initContentImpl('blog', metadata)
 }
@@ -129,33 +132,63 @@ async function loadblogs() {
     .sort((a, b) => b.at - a.at)
 }
 
+async function serve(port = 2026) {
+  const rootHtml = Bun.file(fjoin(DIRS.BUILD, 'index.html'))
+  if (! await rootHtml.exists()) {
+    die(`${DIRS.BUILD}/ dir does not exist. need to build first.`)
+  }
+
+  const server = Bun.serve({ port,
+    async fetch(req) {
+      let { pathname } = new URL(req.url)
+      if (pathname.endsWith('/')) {
+        pathname = fjoin(pathname, 'index.html')
+      }
+      const file = Bun.file(fjoin(DIRS.BUILD, pathname))
+
+      if (! await file.exists()) {
+        console.error('404: %s', pathname)
+        return new Response('Not Found', { status: 404 })
+      }
+      console.log('GET: %s', pathname)
+      return new Response(file)
+    }
+  })
+  console.log('server running at %s', server.url.origin)
+}
+
 if (import.meta.main) {
-  const { values } = parseArgs({
+  const { values: flag } = parseArgs({
     args: Bun.argv,
     options: {
-      list: { type: 'boolean', short: 'l' },
+      list:   { type: 'boolean', short: 'l' },
       create: { type: 'string', short: 'c' }, // will impl later
       github: { type: 'boolean' },
-      'parse-issue': { type: 'string' }
+      parse:  { type: 'string' },
+      serve:  { type: 'boolean' },
+      port:   { type: 'string', short: 'p' },
     },
     allowPositionals: true,
   })
 
-  if (values.list) {
+  if (flag.list) {
     const blogs = await loadblogs()
     for (const blog of blogs) {
       console.log('%s %s  =>  %s', blog.draft ? '(draft)' : ' '.repeat(7), blog.title, blog.dir)
     }
-  } else if (values.github && values['parse-issue']) {
-    const res = await parseIssue(values['parse-issue'])
+  } else if (flag.github && flag.parse) {
+    const res = await parseIssue(flag.parse)
     if (res) {
       console.log(`new blog added: ${res.dir} (${res.slug})`)
-      if (values.github && process.env.GITHUB_OUTPUT) {
+      if (flag.github && process.env.GITHUB_OUTPUT) {
         appendFileSync(
           process.env.GITHUB_OUTPUT,
           `title=${res.title}\nslug=${res.slug}\ndir=${res.dir}\nbranch_name=blog/${res.slug}\npr_title=New blog - ${res.title}\nissue_number=${process.env.ISSUE_NUMBER || ''}\n`
         )
       }
     }
+  } else if (flag.serve) {
+    const port = parseInt(flag.port ?? '2026')
+    serve(port)
   }
 }
