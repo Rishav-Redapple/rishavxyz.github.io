@@ -43,7 +43,7 @@ jobs:
         env:
           ISSUE_BODY: ${{ github.event.issue.body || github.event.inputs.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: bun cli.ts --github --parse-issue "$ISSUE_BODY"
+        run: bun cli.ts --github --parse "$ISSUE_BODY"
 
       - name: Create PR
         env:

@@ -33,6 +33,7 @@ a[target='_blank']::after {
   padding: 0;
   margin: 0;
   border: none;
+  &:focus { box-shadow: none; }
 }
 
 main {
