@@ -7,6 +7,7 @@ Built purely with Bun. Zero dependencies. Content first.
 You can read them on [my website](https://rishavxyz.github.io/blogs/) or right here on GitHub.
 
 <!-- bloglist:start -->
+- **[Why I Chose Svelte for Building a High-Performance, Heavy-Interaction Game HUD](https://rishavxyz.github.io/blogs/why-i-chose-svelte-for-building-a-high-performance-heavy-interaction-game-hud/)** — Read it [on GitHub](content/blogs/2026-11-19-06-36/README.md).
 - **[Functional programming basics](https://rishavxyz.github.io/blogs/functional-programming-basics/)** — Read it [on GitHub](content/blogs/2026-11-15-16-15/README.md).
 - **[B-Tree vs B+ Tree: Index Structures and Range Queries](https://rishavxyz.github.io/blogs/b-tree-vs-b-plus-tree-for-database-indexes/)** — Read it [on GitHub](content/blogs/2026-11-13-12-00/README.md).
 - **[Caching and Indexing Mechanics in SQLite](https://rishavxyz.github.io/blogs/how-caching-and-indexing-work-in-sqlite/)** — Read it [on GitHub](content/blogs/2026-11-13-10-00/README.md).

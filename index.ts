@@ -68,7 +68,7 @@ function genSeo(c: SeoOpts) {
   return tags.join('\n')
 }
 
-async function buildFonts() {
+async function buildFonts(): utils.IOResult<string> {
   const globs = await utils.readglob<Uint8Array>(utils.fjoin(DIRS.ASSETS, 'fonts'), '*.woff2')
   type Font = {
     name: string
@@ -88,122 +88,156 @@ async function buildFonts() {
   `.trim()
 
   const fontFaces: string[] = []
+  const writes: utils.FileCons[] = []
 
   for (const fc of globs) {
     const name = utils.dirname(fc.name)
     const style = fc.name.includes('italic') ? 'italic' : 'normal'
     const isvar = fc.name.includes('var')
 
-    const hashedName = `${name}-${utils.hash(fc.content)}-${utils.basename(fc.name)}`
+    const hashedName = `${name}-${utils.hash(fc.data)}-${utils.basename(fc.name)}`
     const url = utils.fjoin('/fonts', hashedName)
 
-    await utils.write({
+    writes.push({
       name: utils.fjoin(DIRS.BUILD, url),
-      content: fc.content,
+      type: 'bin',
+      data: fc.data,
     })
     fontFaces.push(renderFont({ name, style, url, weight: isvar ? '200 800' : '400' }))
   }
 
   const fontFace = fontFaces.join('\n')
-  const cssFontFile: utils.FileCons = {
-    name: utils.fjoin(DIRS.BUILD, 'css', `${utils.hash(fontFace)}-font.css`),
-    content: fontFace,
-  }
-  utils.write(cssFontFile)
-  return cssFontFile.name.replace(DIRS.BUILD, '')
+  const cssFontFileName = utils.fjoin(DIRS.BUILD, 'css', `${utils.hash(fontFace)}-font.css`)
+  writes.push({
+    name: cssFontFileName,
+    type: 'text',
+    data: fontFace,
+  })
+
+  const results = await Promise.all(writes.map(utils.write))
+  const [, errs] = utils.partition(results)
+  if (errs.length > 0) return utils.Err(errs[0]!)
+
+  return utils.Ok(cssFontFileName.replace(DIRS.BUILD, ''))
 }
 
-async function buildCSSAndAssets() {
-  const favicon = Bun.file(utils.fjoin(DIRS.ASSETS, 'favicon.ico'))
-  if (await favicon.exists()) await Bun.write(utils.fjoin(DIRS.BUILD, 'favicon.ico'), favicon)
+async function buildCSSAndAssets(): utils.IOResult<string> {
+  const copyOps: utils.IOResult<number>[] = []
 
-  const appleTouch = Bun.file(utils.fjoin(DIRS.ASSETS, 'apple-touch-icon.png'))
-  if (await appleTouch.exists())
-    await Bun.write(utils.fjoin(DIRS.BUILD, 'apple-touch-icon.png'), appleTouch)
+  const faviconPath = utils.fjoin(DIRS.ASSETS, 'favicon.ico')
+  if (await utils.exists(faviconPath)) {
+    copyOps.push(utils.copy(faviconPath, utils.fjoin(DIRS.BUILD, 'favicon.ico')))
+  }
 
-  const fontFileName = await buildFonts()
+  const appleTouchPath = utils.fjoin(DIRS.ASSETS, 'apple-touch-icon.png')
+  if (await utils.exists(appleTouchPath)) {
+    copyOps.push(utils.copy(appleTouchPath, utils.fjoin(DIRS.BUILD, 'apple-touch-icon.png')))
+  }
+
+  const fontRes = await buildFonts()
+  if (!fontRes.ok) return fontRes
+  const fontFileName = fontRes.value
   const fontFileTag = `<link rel="stylesheet" href="${fontFileName}">`
 
   const globs = await utils.readglob<string>(DIRS.CSS, '*.css')
   const cssTags: string[] = []
   let siteCssTag = ''
+  const cssWrites: utils.FileCons[] = []
 
   for (const fc of globs) {
-    const hashName = `${utils.hash(fc.content)}-${utils.basename(fc.name)}`
+    const hashName = `${utils.hash(fc.data)}-${utils.basename(fc.name)}`
     const url = utils.fjoin('/css', hashName)
-    await utils.write({
+    cssWrites.push({
       name: utils.fjoin(DIRS.BUILD, url),
-      content: fc.content,
+      type: 'text',
+      data: fc.data,
     })
     const tag = `<link rel="stylesheet" href="${url}">`
 
     if (fc.name.includes('site.css')) siteCssTag = tag
     else cssTags.push(tag)
   }
+
+  const writeOps = cssWrites.map(utils.write)
+  const allOps = await Promise.all([...copyOps, ...writeOps])
+  const [, errs] = utils.partition(allOps)
+  if (errs.length > 0) return utils.Err(errs[0]!)
+
   // site.css goes at the last for precedence
-  return [fontFileTag, ...cssTags, siteCssTag].join('\n')
+  return utils.Ok([fontFileTag, ...cssTags, siteCssTag].join('\n'))
 }
 
-async function getNavLinks(): Promise<NavLink[]> {
+async function getNavLinks(): utils.IOResult<NavLink[]> {
   const globs = await utils.readglob<PageMetadata>(DIRS.PAGES, 'metadata.json')
   const links: NavLink[] = globs
-    .filter((it) => !it.content.draft)
+    .filter((it) => !it.data.draft)
     .map((it) => ({
-      slug: utils.fjoin('/', it.content.slug),
-      label: it.content.label,
-      at: it.content.at,
+      slug: utils.fjoin('/', it.data.slug),
+      label: it.data.label,
+      at: it.data.at,
     }))
   links.push({ slug: '/blogs', label: 'blogs' })
-  return links
+  return utils.Ok(links)
 }
 
-async function buildPages(css: string, navlinks: NavLink[]) {
+async function buildPages(css: string, navlinks: NavLink[]): utils.IOResult<number> {
   const globs = await utils.readglob<PageMetadata>(DIRS.PAGES, 'metadata.json')
   const navlinkHtml = genNavLinks(navlinks)
   const copyright = utils.genCC()
 
-  for (const fc of globs.filter((it) => !it.content.draft)) {
-    let dir = utils.dirname(fc.name)
-    const readmeFile = Bun.file(utils.fjoin(DIRS.PAGES, dir, 'README.md'))
-    if (!(await readmeFile.exists())) utils.die(`README.md missing for page ${dir}`)
+  const tasks = globs
+    .filter((it) => !it.data.draft)
+    .map(async (fc): utils.IOResult<number> => {
+      let dir = utils.dirname(fc.name)
+      const readmePath = utils.fjoin(DIRS.PAGES, dir, 'README.md')
+      const readRes = await utils.read(readmePath, 'text')
+      if (!readRes.ok) return readRes
 
-    const html = utils.md2html(await readmeFile.text(), { headings: true })
-    dir = utils.ishome(fc.content) ? '/' : dir
+      const html = utils.md2html(readRes.value, { headings: true })
+      dir = utils.ishome(fc.data) ? '/' : dir
 
-    const pageHtml = await utils.genHtmlPage({
-      '%%sitename%%': SITE_NAME,
-      '%%css%%': css,
-      '%%seo%%': genSeo(fc.content),
-      '%%content%%': html,
-      '%%navlinks%%': navlinkHtml,
-      '%%copyright%%': copyright,
+      const pageHtmlRes = await utils.genHtmlPage({
+        '%%sitename%%': SITE_NAME,
+        '%%css%%': css,
+        '%%seo%%': genSeo(fc.data),
+        '%%content%%': html,
+        '%%navlinks%%': navlinkHtml,
+        '%%copyright%%': copyright,
+      })
+      if (!pageHtmlRes.ok) return pageHtmlRes
+
+      return utils.write({
+        name: utils.fjoin(DIRS.BUILD, dir, 'index.html'),
+        type: 'text',
+        data: utils.htmlpp(pageHtmlRes.value),
+      })
     })
 
-    await utils.write({
-      name: utils.fjoin(DIRS.BUILD, dir, 'index.html'),
-      content: utils.htmlpp(pageHtml),
-    })
-  }
+  const results = await Promise.all(tasks)
+  const [oks, errs] = utils.partition(results)
+  if (errs.length > 0) return utils.Err(errs[0]!)
+  return utils.Ok(oks.length)
 }
 
-async function getBlogs(): Promise<BlogItem[]> {
+async function getBlogs(): utils.IOResult<BlogItem[]> {
   const globs = await utils.readglob<BlogMetadata>(DIRS.BLOGS, 'metadata.json')
-  return globs
-    .filter((it) => !it.content.draft)
-    .map((it) => ({ dir: utils.dirname(it.name), ...it.content }))
+  const blogs = globs
+    .filter((it) => !it.data.draft)
+    .map((it) => ({ dir: utils.dirname(it.name), ...it.data }))
     .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+  return utils.Ok(blogs)
 }
 
-async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
+async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]): utils.IOResult<number> {
   const navlinkHtml = genNavLinks(navlinks)
   const copyright = utils.genCC()
-  const cards: string[] = []
 
-  for (const blog of blogs) {
-    const readmeFile = Bun.file(utils.fjoin(DIRS.BLOGS, blog.dir, 'README.md'))
-    if (!(await readmeFile.exists())) utils.die(`README.md missing for blog ${blog.dir}`)
+  const blogTasks = blogs.map(async (blog): utils.IOResult<{ bytes: number; card: string }> => {
+    const readmePath = utils.fjoin(DIRS.BLOGS, blog.dir, 'README.md')
+    const readRes = await utils.read(readmePath, 'text')
+    if (!readRes.ok) return readRes
 
-    const md = await readmeFile.text()
+    const md = readRes.value
     const content = [
       `<section class="blog">`,
       utils.md2html(md, { headings: true }),
@@ -215,7 +249,7 @@ async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
       `</p>`,
     ].join('\n')
 
-    const postHtml = await utils.genHtmlPage({
+    const postHtmlRes = await utils.genHtmlPage({
       '%%sitename%%': SITE_NAME,
       '%%css%%': css,
       '%%seo%%': genSeo({ ...blog, slug: utils.fjoin('blogs', blog.slug) }),
@@ -223,6 +257,7 @@ async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
       '%%navlinks%%': navlinkHtml,
       '%%copyright%%': copyright,
     })
+    if (!postHtmlRes.ok) return postHtmlRes
 
     const date = utils.fdate(blog.at)
     const meta = [
@@ -235,19 +270,23 @@ async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
       `</p>`,
     ].join('')
 
-    await utils.write({
-      name: utils.fjoin(DIRS.BUILD, 'blogs', blog.slug, 'index.html'),
-      content: utils.htmlpp(postHtml, {
-        'section.blog h1': {
-          // there must be only one h1 per blog
-          element(h1) {
-            h1.after(meta, { html: true })
-          },
+    const postHtml = utils.htmlpp(postHtmlRes.value, {
+      'section.blog h1': {
+        // there must be only one h1 per blog
+        element(h1) {
+          h1.after(meta, { html: true })
         },
-      }),
+      },
     })
 
-    const card = await utils.genBlogCard({
+    const writeRes = await utils.write({
+      name: utils.fjoin(DIRS.BUILD, 'blogs', blog.slug, 'index.html'),
+      type: 'text',
+      data: postHtml,
+    })
+    if (!writeRes.ok) return writeRes
+
+    const cardRes = await utils.genBlogCard({
       '%%route%%': `/blogs/${blog.slug}/`,
       '%%title%%': utils.esc(blog.title),
       '%%datetime%%': blog.at,
@@ -255,11 +294,18 @@ async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
       '%%excerpt%%': utils.esc(blog.excerpt),
       '%%category%%': blog.category ? `#${utils.esc(blog.category)}` : '',
     })
-    cards.push(card)
-  }
+    if (!cardRes.ok) return cardRes
 
+    return utils.Ok({ bytes: writeRes.value, card: cardRes.value })
+  })
+
+  const blogResults = await Promise.all(blogTasks)
+  const [oks, errs] = utils.partition(blogResults)
+  if (errs.length > 0) return utils.Err(errs[0]!)
+
+  const cards = oks.map((o) => o.card)
   const listContent = `<section class="blog-list grid">\n${cards.join('\n')}\n</section>`
-  const blogsIndexHtml = await utils.genHtmlPage({
+  const blogsIndexHtmlRes = await utils.genHtmlPage({
     '%%sitename%%': SITE_NAME,
     '%%css%%': css,
     '%%seo%%': genSeo({
@@ -271,22 +317,28 @@ async function buildBlogs(css: string, navlinks: NavLink[], blogs: BlogItem[]) {
     '%%navlinks%%': navlinkHtml,
     '%%copyright%%': copyright,
   })
+  if (!blogsIndexHtmlRes.ok) return blogsIndexHtmlRes
 
-  await utils.write({
+  const indexWriteRes = await utils.write({
     name: utils.fjoin(DIRS.BUILD, 'blogs', 'index.html'),
-    content: blogsIndexHtml,
+    type: 'text',
+    data: blogsIndexHtmlRes.value,
   })
+  if (!indexWriteRes.ok) return indexWriteRes
+
+  return utils.Ok(oks.length + 1)
 }
 
-async function build404(css: string, navlinks: NavLink[]) {
+async function build404(css: string, navlinks: NavLink[]): utils.IOResult<number> {
   const navlinkHtml = genNavLinks(navlinks)
   const copyright = utils.genCC()
-  const emptyCardHtml = await utils.genEmptyCard({
+  const emptyCardRes = await utils.genEmptyCard({
     '%%title%%': `You're lost? How!?`,
     '%%description%%': `This site has only ${navlinks.length} pages, and you're lost in here? That's brilliant ese!`,
   })
+  if (!emptyCardRes.ok) return emptyCardRes
 
-  const html404 = await utils.genHtmlPage({
+  const html404Res = await utils.genHtmlPage({
     '%%sitename%%': SITE_NAME,
     '%%css%%': css,
     '%%seo%%': genSeo({
@@ -295,18 +347,20 @@ async function build404(css: string, navlinks: NavLink[]) {
       excerpt: 'Page not found',
       draft: true,
     }),
-    '%%content%%': emptyCardHtml,
+    '%%content%%': emptyCardRes.value,
     '%%navlinks%%': navlinkHtml,
     '%%copyright%%': copyright,
   })
+  if (!html404Res.ok) return html404Res
 
-  await utils.write({
+  return utils.write({
     name: utils.fjoin(DIRS.BUILD, '404.html'),
-    content: html404,
+    type: 'text',
+    data: html404Res.value,
   })
 }
 
-async function buildRSS(blogs: BlogItem[]) {
+async function buildRSS(blogs: BlogItem[]): utils.IOResult<number> {
   const items = blogs.map((blog) => {
     const link = toUrl(utils.fjoin('blogs', blog.slug))
     const desc = utils.esc(blog.excerpt)
@@ -330,7 +384,7 @@ async function buildRSS(blogs: BlogItem[]) {
     return item
   })
 
-  const rss = await utils.genTempl('rss.xml', {
+  const rssRes = await utils.genTempl('rss.xml', {
     '%%title%%': SITE_NAME,
     '%%canonical%%': SITE_URL,
     '%%description%%': 'Articles and thoughts by Rishav Mandal',
@@ -338,14 +392,16 @@ async function buildRSS(blogs: BlogItem[]) {
     '%%rssLink%%': `${SITE_URL}/rss.xml`,
     '%%items%%': items.join('\n'),
   })
+  if (!rssRes.ok) return rssRes
 
-  await utils.write({
+  return utils.write({
     name: utils.fjoin(DIRS.BUILD, 'rss.xml'),
-    content: rss,
+    type: 'text',
+    data: rssRes.value,
   })
 }
 
-async function buildSitemap(navlinks: NavLink[], blogs: BlogItem[]) {
+async function buildSitemap(navlinks: NavLink[], blogs: BlogItem[]): utils.IOResult<number> {
   const pageUrls = navlinks.map((link) => {
     const url = toUrl(link.slug)
     const lastmod = link.at ?? new Date().toISOString()
@@ -363,17 +419,19 @@ async function buildSitemap(navlinks: NavLink[], blogs: BlogItem[]) {
   })
 
   const urls = [...pageUrls, ...blogUrls].join('\n')
-  const sitemap = await utils.genTempl('sitemap.xml', {
+  const sitemapRes = await utils.genTempl('sitemap.xml', {
     '%%urls%%': urls,
   })
+  if (!sitemapRes.ok) return sitemapRes
 
-  await utils.write({
+  return utils.write({
     name: utils.fjoin(DIRS.BUILD, 'sitemap.xml'),
-    content: sitemap,
+    type: 'text',
+    data: sitemapRes.value,
   })
 }
 
-async function buildMiscFiles() {
+async function buildMiscFiles(): utils.IOResult<number> {
   const robots = `
 User-agent: *
 Allow: /
@@ -381,30 +439,34 @@ Allow: /
 Sitemap: ${SITE_URL}/sitemap.xml
   `.trim()
 
-  ;[
-    { name: '.nojekyll', content: '' },
-    { name: 'robots.txt', content: robots },
+  const files: utils.FileCons[] = [
+    { name: utils.fjoin(DIRS.BUILD, '.nojekyll'), type: 'text', data: '' },
+    { name: utils.fjoin(DIRS.BUILD, 'robots.txt'), type: 'text', data: robots },
   ]
-    .map((it) => ({
-      name: utils.fjoin(DIRS.BUILD, it.name),
-      content: it.content,
-    }))
-    .forEach(async (file) => await utils.write(file))
+
+  const results = await Promise.all(files.map(utils.write))
+  const [, errs] = utils.partition(results)
+  if (errs.length > 0) return utils.Err(errs[0]!)
+  return utils.Ok(files.length)
 }
 
-async function rmdist() {
-  await rm(utils.fjoin(DIRS.BUILD), { recursive: true, force: true })
+async function rmdist(): utils.IOResult<void> {
+  try {
+    await rm(utils.fjoin(DIRS.BUILD), { recursive: true, force: true })
+    return utils.Ok(undefined)
+  } catch (e) {
+    return utils.Err(e as Error)
+  }
 }
 
-async function updateReadme(blogs: BlogItem[]): Promise<void> {
-  if (blogs.length < 1) return // do nothing
+async function updateReadme(blogs: BlogItem[]): utils.IOResult<void> {
+  if (blogs.length < 1) return utils.Ok(undefined)
 
   const readme = 'README.md'
-  const file = Bun.file(readme)
+  const readRes = await utils.read(readme, 'text')
+  if (!readRes.ok) return utils.Ok(undefined)
 
-  if (!(await file.exists())) return
-  const text = await file.text()
-
+  const text = readRes.value
   const bloglist = blogs
     .filter((b) => !b.draft)
     .map((b) => {
@@ -415,13 +477,16 @@ async function updateReadme(blogs: BlogItem[]): Promise<void> {
     .join('\n')
 
   const regex = /(<!-- bloglist:start -->)[\s\S]*?(<!-- bloglist:end -->)/
-  if (!regex.test(text)) return // fail silently, dont stop the pipeline
+  if (!regex.test(text)) return utils.Ok(undefined)
 
-  const fc: utils.FileCons = {
+  const updated = text.replace(regex, (_, start, end) => [start, bloglist, end].join('\n'))
+  const writeRes = await utils.write({
     name: readme,
-    content: text.replace(regex, (_, start, end) => [start, bloglist, end].join('\n')),
-  }
-  utils.write(fc)
+    type: 'text',
+    data: updated,
+  })
+  if (!writeRes.ok) return writeRes
+  return utils.Ok(undefined)
 }
 
 type BuildContext = {
@@ -431,8 +496,9 @@ type BuildContext = {
 }
 
 type Pipeline = {
-  [name: string]: (ctx: BuildContext) => Promise<void>
+  [name: string]: (ctx: BuildContext) => Promise<utils.Result<unknown, Error>>
 }
+
 async function run(pipeline: Pipeline) {
   const ctx: BuildContext = {
     css: '',
@@ -442,8 +508,8 @@ async function run(pipeline: Pipeline) {
   for (const step in pipeline) {
     console.log('BUILD:', step)
     const fn = pipeline[step]!
-    const result = await utils.unwrap(() => fn(ctx))
-    if (!result.ok) utils.die(`ERROR: ${step}: ${result.err}`)
+    const result = await fn(ctx)
+    if (!result.ok) utils.die(`ERROR: ${step}: ${result.err.message}`)
   }
   console.log('BUILD: success!', DIRS.BUILD + '/ is ready to deploy')
 }
@@ -451,16 +517,22 @@ async function run(pipeline: Pipeline) {
 const pipeline: Pipeline = {
   'cleaning build dir': rmdist,
   'building assets & css': async (ctx) => {
-    ctx.css = await buildCSSAndAssets()
+    const res = await buildCSSAndAssets()
+    if (res.ok) ctx.css = res.value
+    return res
   },
   'building navlinks': async (ctx) => {
-    ctx.navlinks = await getNavLinks()
+    const res = await getNavLinks()
+    if (res.ok) ctx.navlinks = res.value
+    return res
   },
   'building pages': (ctx) => buildPages(ctx.css, ctx.navlinks),
   'building 404 page': (ctx) => build404(ctx.css, ctx.navlinks),
   'building blogs': async (ctx) => {
-    ctx.blogs = await getBlogs()
-    await buildBlogs(ctx.css, ctx.navlinks, ctx.blogs)
+    const blogsRes = await getBlogs()
+    if (!blogsRes.ok) return blogsRes
+    ctx.blogs = blogsRes.value
+    return await buildBlogs(ctx.css, ctx.navlinks, ctx.blogs)
   },
   'building rss feed': (ctx) => buildRSS(ctx.blogs),
   'building sitemap': (ctx) => buildSitemap(ctx.navlinks, ctx.blogs),
