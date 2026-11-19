@@ -1,0 +1,8 @@
+{
+  "title": "Why I Chose Svelte for Building a High-Performance, Heavy-Interaction Game HUD",
+  "excerpt": "Building an in-game HUD overlay means balancing heavy interactivity with native performance. After starting with Vanilla JavaScript and exploring Lit, I chose Svelte for our engine-agnostic HUD. Here is why Svelte won—from zero-VDOM speed and effortless transitions to declarative Payline grids and untouched developer contracts.",
+  "draft": false,
+  "at": "2026-11-19T06:36:33.718Z",
+  "category": "svelte",
+  "slug": "why-i-chose-svelte-for-building-a-high-performance-heavy-interaction-game-hud"
+}
