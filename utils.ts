@@ -3,28 +3,46 @@ import { basename, dirname, join } from 'node:path'
 export const fjoin = join
 export { basename, dirname }
 
-export type Result<T, E = string> = { ok: true; data: T } | { ok: false; err: E }
+// --- Pure Monadic & Functional Utilities ---
 
-export function Ok<T>(value: T): Result<T> {
-  return { ok: true, data: value }
+export type Maybe<T>
+  = { ok: true; value: T }
+  | { ok: false }
+
+export const Just = <T>(value: T): Maybe<T> => ({ ok: true, value }) as const
+export const Nothing: Maybe<never> = { ok: false } as const
+export const fromMaybe = <T>(def: T, m: Maybe<T>): T => (m.ok ? m.value : def)
+
+export type Result<T, E = Error>
+  = { ok: true; value: T }
+  | { ok: false; err: E }
+
+export type IOMaybe<T> = Promise<Maybe<T>>
+export type IOResult<T, E = Error> = Promise<Result<T, E>>
+
+export const Ok = <T>(value: T): Result<T, never> => ({ ok: true, value }) as const
+export const Err = <E>(err: E): Result<never, E> => ({ ok: false, err }) as const
+
+export function partition<T, E>(results: Result<T, E>[]): [T[], E[]] {
+  const oks: T[] = []
+  const errs: E[] = []
+  for (const result of results) {
+    result.ok ? oks.push(result.value) : errs.push(result.err)
+  }
+  return [oks, errs] as const
 }
 
-export function Err(value: string): Result<never> {
-  return { ok: false, err: value }
-}
-
-export async function unwrap<T>(f: () => T | Promise<T>): Promise<Result<T>> {
+export async function unwrap<T>(f: () => T | Promise<T>): Promise<Result<T, Error>> {
   try {
     const value = await f()
-    return { ok: true, data: value }
+    return Ok(value)
   } catch (e) {
-    const err = (e as Error).message
-    return { ok: false, err }
+    return Err(e as Error)
   }
 }
 
-export function die(msg: string): never {
-  console.error(msg)
+export function die(msg: string | Error): never {
+  console.error(msg instanceof Error ? msg.message : msg)
   process.exit(1)
 }
 
@@ -161,14 +179,66 @@ export function ishome(a: { slug?: string; label?: string } | string) {
   return a.slug === '/' || a.slug === 'home' || a.label === 'home' || a.label === 'index'
 }
 
-export type FileCons<T = string | Uint8Array | object> = {
-  name: string
-  content: T
+// --- File Cons & Pure Async I/O Utilities ---
+
+export type FileCons = { name: string } & (
+  | { type: 'text'; data: string }
+  | { type: 'json'; data: unknown }
+  | { type: 'bin'; data: Uint8Array }
+)
+
+export async function write(fc: FileCons): IOResult<number> {
+  try {
+    const data = fc.type === 'json'
+      ? JSON.stringify(fc.data, null, 2)!
+      : fc.data
+
+    const bytes = await Bun.write(fc.name, data)
+    return Ok(bytes)
+  } catch (e) {
+    return Err(e as Error)
+  }
 }
 
-export async function readglob<T = string>(dir: string, pattern: string): Promise<FileCons<T>[]> {
+export async function copy(src: string, dest: string): IOResult<number> {
+  try {
+    const bytes = await Bun.write(dest, Bun.file(src))
+    return Ok(bytes)
+  } catch (e) {
+    return Err(e as Error)
+  }
+}
+
+export function read(path: string, type: 'text'): IOResult<string>
+export function read(path: string, type: 'bin'): IOResult<Uint8Array>
+export function read<T>(path: string, type: 'json'): IOResult<T>
+export async function read(path: string, type: string) {
+  try {
+    const file = Bun.file(path)
+
+    if (type === 'text' || type === 'json') {
+      const data = await file.text()
+      if (type === 'text') return Ok(data)
+      return Ok(Bun.JSON5.parse(data))
+    }
+    return Ok(await file.bytes())
+  } catch (e) {
+    return Err(e as Error)
+  }
+}
+
+export async function exists(path: string): Promise<boolean> {
+  return await Bun.file(path).exists()
+}
+
+export type ScannedFile<T = unknown> = {
+  name: string
+  data: T
+}
+
+export async function readglob<T = string>(dir: string, pattern: string): Promise<ScannedFile<T>[]> {
   const glob = new Bun.Glob(fjoin('**', pattern))
-  const data: FileCons<T>[] = []
+  const data: ScannedFile<T>[] = []
 
   for await (const filepath of glob.scan(dir)) {
     const file = Bun.file(fjoin(dir, filepath))
@@ -183,25 +253,13 @@ export async function readglob<T = string>(dir: string, pattern: string): Promis
           ? await file.text()
           : await file.bytes()
     ) as T
-    data.push({ name, content })
+    data.push({ name, data: content })
   }
 
   return data
 }
 
-export async function write(fc: FileCons): Promise<void> {
-  if (fc.content instanceof Uint8Array) {
-    await Bun.write(fc.name, fc.content)
-  } else if (typeof fc.content === 'string') {
-    await Bun.write(fc.name, fc.content)
-  } else {
-    await Bun.write(fc.name, JSON.stringify(fc.content, null, 2))
-  }
-}
-
-export async function exists(path: string): Promise<boolean> {
-  return await Bun.file(path).exists()
-}
+// --- Templating ---
 
 export type MakePhldr<K extends string> = {
   [placeholder in `%%${K}%%`]: string
@@ -217,16 +275,16 @@ export async function genTempl(
   templname: string,
   placeholder: TemplPhldr,
   templDir = 'template',
-): Promise<string> {
+): IOResult<string> {
   const templPath = fjoin(templDir, templname)
-  const file = Bun.file(templPath)
-  if (!(await file.exists())) die(`${templPath} does not exist`)
+  const res = await read(templPath, 'text')
+  if (!res.ok) return res
 
-  const result = await unwrap(async () =>
-    Object.entries(placeholder).reduce((s, a) => s.replaceAll(...a), await file.text()),
+  const rendered = Object.entries(placeholder).reduce(
+    (s, [key, val]) => s.replaceAll(key, val),
+    res.value,
   )
-  if (!result.ok) die(result.err)
-  return result.data
+  return Ok(rendered)
 }
 
 export const genHtmlPage = (p: PagePhldr) => genTempl('page.html', p)

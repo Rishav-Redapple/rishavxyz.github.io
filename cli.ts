@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { DIRS } from './index'
-import { type FileCons, die, fjoin, readglob, slugify, tsnow, unwrap, write } from './utils'
+import { type FileCons, die, fjoin, partition, readglob, slugify, tsnow, write } from './utils'
 
 export type CommonMetadata = {
   title: string
@@ -54,15 +54,18 @@ async function initContentImpl(...[initfor, opts]: InitOpts): Promise<InitResult
 
   const metafile: FileCons = {
     name: fjoin(dir, 'metadata.json'),
-    content: metaContent,
+    type: 'json',
+    data: metaContent,
   }
   const mainfile: FileCons = {
     name: fjoin(dir, 'README.md'),
-    content: ['# ', title, '\n\n', opts.content ?? excerpt].join('')
+    type: 'text',
+    data: ['# ', title, '\n\n', opts.content ?? excerpt].join('')
   }
 
-  const result = await unwrap(async () => await Promise.all([metafile, mainfile].map(write)))
-  if (!result.ok) die(result.err)
+  const results = await Promise.all([metafile, mainfile].map(write))
+  const [, errs] = partition(results)
+  if (errs.length > 0) die(errs[0]!.message)
   return { dir, slug, title }
 }
 
@@ -120,13 +123,13 @@ async function loadblogs() {
   const glob = await readglob<BlogMetadata>(DIRS.BLOGS, 'metadata.json')
   return glob
     .map((it) => {
-      const title = it.content.title.slice(0, 27) + '...'
+      const title = it.data.title.slice(0, 27) + '...'
       const dir = fjoin(DIRS.BLOGS, dirname(it.name))
       return {
         dir,
         title,
-        draft: it.content.draft,
-        at: +new Date(it.content.at),
+        draft: it.data.draft,
+        at: +new Date(it.data.at),
       }
     })
     .sort((a, b) => b.at - a.at)
